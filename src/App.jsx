@@ -250,7 +250,7 @@ function App() {
         await loadTrelloStatus(token)
 
         const totalBoards = response.sync?.boards ?? boards.length
-        showToast(`Trello connected — ${totalBoards} board(s) synced`)
+        showToast(`Trello connected — syncing ${totalBoards} board(s) in the background`)
       } catch (exception) {
         setError(exception.message)
       } finally {
@@ -261,6 +261,26 @@ function App() {
 
     void completeConnect()
   }, [token])
+
+  useEffect(() => {
+    if (!token || !trelloStatus.connected || trelloSyncing) {
+      return
+    }
+
+    const interval = window.setInterval(async () => {
+      try {
+        await apiRequest('/api/trello/pull', {
+          method: 'POST',
+          token,
+        })
+        await reloadBoards()
+      } catch {
+        // Ignore background pull errors.
+      }
+    }, 12000)
+
+    return () => window.clearInterval(interval)
+  }, [token, trelloStatus.connected, trelloSyncing])
 
   const editingTicket = useMemo(() => {
     if (!board || !editingTicketId) {
