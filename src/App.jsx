@@ -949,12 +949,7 @@ function App() {
         </header>
 
         {token && board ? (
-          <div
-            className="columns"
-            style={{
-              gridTemplateColumns: `repeat(${columns.length + 1}, minmax(240px, 1fr))`,
-            }}
-          >
+          <div className="columns">
             {columns.map((column) => (
               <article
                 className={`column card ${

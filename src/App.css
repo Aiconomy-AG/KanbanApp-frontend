@@ -259,17 +259,22 @@ button:focus-visible {
 
 .columns {
   display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 272px;
   gap: 16px;
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 8px;
   align-items: start;
   align-content: stretch;
+  justify-content: start;
   min-height: 0;
   height: 100%;
 }
 
 .column {
+  width: 272px;
+  max-width: 272px;
   padding: 16px;
   display: grid;
   grid-template-rows: auto auto 1fr;
