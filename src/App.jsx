@@ -296,11 +296,57 @@ function App() {
   }
 
   async function moveTicket(ticketId, columnId) {
-    if (!token) {
+    if (!token || !board) {
       return
     }
 
-    setMutating(true)
+    const sourceColumn = board.columns.find((column) =>
+      column.tickets?.some((ticket) => ticket.id === ticketId),
+    )
+
+    if (!sourceColumn || sourceColumn.id === columnId) {
+      return
+    }
+
+    const previousBoard = board
+
+    setBoard((current) => {
+      if (!current) {
+        return current
+      }
+
+      let movedTicket = null
+
+      const nextColumns = current.columns.map((column) => {
+        const tickets = column.tickets ?? []
+        const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId)
+
+        if (ticketIndex === -1) {
+          return column
+        }
+
+        movedTicket = tickets[ticketIndex]
+
+        return {
+          ...column,
+          tickets: tickets.filter((ticket) => ticket.id !== ticketId),
+        }
+      })
+
+      if (!movedTicket) {
+        return current
+      }
+
+      return {
+        ...current,
+        columns: nextColumns.map((column) =>
+          column.id === columnId
+            ? { ...column, tickets: [...(column.tickets ?? []), movedTicket] }
+            : column,
+        ),
+      }
+    })
+
     setError('')
 
     try {
@@ -309,12 +355,9 @@ function App() {
         token,
         body: { column_id: columnId },
       })
-
-      await reloadBoard()
     } catch (exception) {
+      setBoard(previousBoard)
       setError(exception.message)
-    } finally {
-      setMutating(false)
     }
   }
 
