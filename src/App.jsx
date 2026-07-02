@@ -45,11 +45,37 @@ function App() {
   const [newColumnName, setNewColumnName] = useState('')
   const [showCreateBoardForm, setShowCreateBoardForm] = useState(false)
   const [newBoardName, setNewBoardName] = useState('')
+  const [trelloStatus, setTrelloStatus] = useState({ connected: false, links: [] })
+  const [trelloApiKey, setTrelloApiKey] = useState('')
+  const [showTrelloLinkModal, setShowTrelloLinkModal] = useState(false)
+  const [trelloBoardOptions, setTrelloBoardOptions] = useState([])
+  const [selectedTrelloBoardId, setSelectedTrelloBoardId] = useState('')
+  const [trelloListOptions, setTrelloListOptions] = useState([])
+  const [columnMappings, setColumnMappings] = useState({})
+  const [mappingColumnId, setMappingColumnId] = useState(null)
+  const [mappingListId, setMappingListId] = useState('')
+  const [mappingCreateName, setMappingCreateName] = useState('')
+  const [toasts, setToasts] = useState([])
+  const [pollSince, setPollSince] = useState(() => new Date().toISOString())
 
   const board = useMemo(
     () => boards.find((item) => item.id === activeBoardId) ?? null,
     [boards, activeBoardId],
   )
+
+  const boardTrelloLink = board?.trello_link ?? null
+  const unmappedColumns = useMemo(
+    () => (board?.columns ?? []).filter((column) => boardTrelloLink && !column.trello_list_id),
+    [board, boardTrelloLink],
+  )
+
+  function showToast(message) {
+    const id = Date.now()
+    setToasts((current) => [...current, { id, message }])
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id))
+    }, 3500)
+  }
 
   function selectBoard(boardId) {
     setActiveBoardId(boardId)
@@ -106,6 +132,231 @@ function App() {
     return nextBoards
   }
 
+  async function loadTrelloStatus(nextToken = token) {
+    if (!nextToken) {
+      return
+    }
+
+    try {
+      const [config, status] = await Promise.all([
+        apiRequest('/api/trello/config', { token: nextToken }),
+        apiRequest('/api/trello/status', { token: nextToken }),
+      ])
+      setTrelloApiKey(config.api_key ?? '')
+      setTrelloStatus(status)
+    } catch {
+      // Trello not configured yet.
+    }
+  }
+
+  async function handleConnectTrello() {
+    if (!token) {
+      return
+    }
+
+    if (!trelloApiKey) {
+      await loadTrelloStatus(token)
+    }
+
+    if (!trelloApiKey) {
+      setError('Trello API key is not configured on the server.')
+      return
+    }
+
+    const returnUrl = `${window.location.origin}/trello/callback`
+    const url = new URL('https://trello.com/1/authorize')
+    url.searchParams.set('expiration', 'never')
+    url.searchParams.set('name', 'KanbanApp')
+    url.searchParams.set('scope', 'read,write')
+    url.searchParams.set('response_type', 'token')
+    url.searchParams.set('key', trelloApiKey)
+    url.searchParams.set('return_url', returnUrl)
+    window.location.href = url.toString()
+  }
+
+  async function handleDisconnectTrello() {
+    if (!token) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      await apiRequest('/api/trello/disconnect', { method: 'POST', token })
+      setTrelloStatus({ connected: false, links: [] })
+      await reloadBoards()
+    } catch (exception) {
+      setError(exception.message)
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  async function openTrelloLinkWizard() {
+    if (!token || !board) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      const response = await apiRequest('/api/trello/boards', { token })
+      setTrelloBoardOptions(response.boards ?? [])
+      setSelectedTrelloBoardId(response.boards?.[0]?.id ?? '')
+      const initialMappings = {}
+      for (const column of board.columns ?? []) {
+        initialMappings[column.id] = { trello_list_id: '', create_name: '' }
+      }
+      setColumnMappings(initialMappings)
+      setShowTrelloLinkModal(true)
+    } catch (exception) {
+      setError(exception.message)
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  async function loadTrelloListsForBoard(trelloBoardId) {
+    if (!token || !trelloBoardId) {
+      return
+    }
+
+    const response = await apiRequest(`/api/trello/boards/${trelloBoardId}/lists`, { token })
+    setTrelloListOptions(response.lists ?? [])
+  }
+
+  async function handleLinkBoardSubmit(event) {
+    event.preventDefault()
+
+    if (!token || !board || !selectedTrelloBoardId) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      const response = await apiRequest(`/api/boards/${board.id}/trello/link`, {
+        method: 'POST',
+        token,
+        body: {
+          trello_board_id: selectedTrelloBoardId,
+          columns: (board.columns ?? []).map((column) => ({
+            column_id: column.id,
+            trello_list_id: columnMappings[column.id]?.trello_list_id || null,
+            create_name: columnMappings[column.id]?.create_name || null,
+          })),
+        },
+      })
+
+      upsertBoard(response.board)
+      await loadTrelloStatus()
+      setShowTrelloLinkModal(false)
+      showToast('Board linked to Trello')
+    } catch (exception) {
+      setError(exception.message)
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  async function handleUnlinkBoard() {
+    if (!token || !board || !window.confirm('Unlink this board from Trello?')) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      await apiRequest(`/api/boards/${board.id}/trello/link`, { method: 'DELETE', token })
+      await reloadBoards()
+      await loadTrelloStatus()
+      showToast('Board unlinked from Trello')
+    } catch (exception) {
+      setError(exception.message)
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  async function handleSyncModeChange(syncMode) {
+    if (!token || !board) {
+      return
+    }
+
+    try {
+      const response = await apiRequest(`/api/boards/${board.id}/trello/sync-mode`, {
+        method: 'PATCH',
+        token,
+        body: { sync_mode: syncMode },
+      })
+      upsertBoard({ ...board, trello_link: response.link })
+      await loadTrelloStatus()
+    } catch (exception) {
+      setError(exception.message)
+    }
+  }
+
+  async function handleManualTrelloSync() {
+    if (!token || !board) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      const response = await apiRequest(`/api/boards/${board.id}/trello/sync`, {
+        method: 'POST',
+        token,
+      })
+      upsertBoard(response.board)
+      const total =
+        (response.result?.pushed ?? 0) +
+        (response.result?.pulled ?? 0)
+      showToast(total > 0 ? `Synced ${total} changes` : 'Trello synced')
+      setPollSince(new Date().toISOString())
+    } catch (exception) {
+      setError(exception.message)
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  async function handleMapColumnSubmit(event) {
+    event.preventDefault()
+
+    if (!token || !board || !mappingColumnId) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      await apiRequest(`/api/boards/${board.id}/columns/${mappingColumnId}/trello/map`, {
+        method: 'POST',
+        token,
+        body: {
+          trello_list_id: mappingListId || null,
+          create_name: mappingCreateName.trim() || null,
+        },
+      })
+      await reloadBoards()
+      setMappingColumnId(null)
+      setMappingListId('')
+      setMappingCreateName('')
+      showToast('Column mapped to Trello')
+    } catch (exception) {
+      setError(exception.message)
+    } finally {
+      setMutating(false)
+    }
+  }
+
   useEffect(() => {
     if (!token) {
       return
@@ -123,6 +374,7 @@ function App() {
         }
 
         await loadBoards(token)
+        await loadTrelloStatus(token)
       } catch (exception) {
         clearStoredToken()
         setToken(null)
@@ -146,6 +398,73 @@ function App() {
       alive = false
     }
   }, [token])
+
+  useEffect(() => {
+    if (window.location.pathname !== '/trello/callback' || !token) {
+      return
+    }
+
+    const hash = window.location.hash.startsWith('#')
+      ? window.location.hash.slice(1)
+      : window.location.hash
+    const params = new URLSearchParams(hash)
+    const trelloToken = params.get('token')
+
+    if (!trelloToken) {
+      return
+    }
+
+    async function completeConnect() {
+      try {
+        await apiRequest('/api/trello/connect', {
+          method: 'POST',
+          token,
+          body: { token: trelloToken },
+        })
+        await loadTrelloStatus(token)
+        showToast('Connected to Trello')
+      } catch (exception) {
+        setError(exception.message)
+      } finally {
+        window.history.replaceState({}, '', '/')
+      }
+    }
+
+    void completeConnect()
+  }, [token])
+
+  useEffect(() => {
+    if (!token || !board || !boardTrelloLink || boardTrelloLink.sync_mode !== 'auto') {
+      return
+    }
+
+    const interval = window.setInterval(async () => {
+      try {
+        const response = await apiRequest(
+          `/api/boards/${board.id}/trello/changes?since=${encodeURIComponent(pollSince)}`,
+          { token },
+        )
+
+        if (response.changes > 0) {
+          await reloadBoards()
+          showToast('Trello synced')
+          setPollSince(new Date().toISOString())
+        }
+      } catch {
+        // Ignore polling errors.
+      }
+    }, 12000)
+
+    return () => window.clearInterval(interval)
+  }, [token, board, boardTrelloLink, pollSince])
+
+  useEffect(() => {
+    if (!showTrelloLinkModal || !selectedTrelloBoardId) {
+      return
+    }
+
+    void loadTrelloListsForBoard(selectedTrelloBoardId)
+  }, [showTrelloLinkModal, selectedTrelloBoardId])
 
   const editingTicket = useMemo(() => {
     if (!board || !editingTicketId) {
@@ -207,6 +526,7 @@ function App() {
       setToken(response.token)
       setUser(response.user)
       applyAuthBoard(response)
+      await loadTrelloStatus(response.token)
     } catch (exception) {
       setError(exception.message)
     }
@@ -226,6 +546,7 @@ function App() {
       setToken(response.token)
       setUser(response.user)
       applyAuthBoard(response)
+      await loadTrelloStatus(response.token)
     } catch (exception) {
       setError(exception.message)
     }
@@ -796,6 +1117,34 @@ function App() {
               </button>
             </div>
 
+            <div className="card form-card trello-card">
+              <div className="panel-head">
+                <div>
+                  <p className="eyebrow">Trello</p>
+                  <strong>{trelloStatus.connected ? 'Connected' : 'Not connected'}</strong>
+                </div>
+              </div>
+              {trelloStatus.connected ? (
+                <button
+                  type="button"
+                  className="secondary destructive"
+                  onClick={handleDisconnectTrello}
+                  disabled={boardBusy}
+                >
+                  Disconnect Trello
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={handleConnectTrello}
+                  disabled={boardBusy}
+                >
+                  Connect to Trello
+                </button>
+              )}
+            </div>
+
             <form className="card form-card creator-panel" onSubmit={handleCreateTicketSubmit}>
               <div className="panel-head">
                 <div>
@@ -944,9 +1293,74 @@ function App() {
                   Delete board
                 </button>
               ) : null}
+
+              {board && trelloStatus.connected ? (
+                boardTrelloLink ? (
+                  <>
+                    <label className="sync-toggle">
+                      <span>Auto sync</span>
+                      <input
+                        type="checkbox"
+                        checked={boardTrelloLink.sync_mode === 'auto'}
+                        onChange={(event) =>
+                          handleSyncModeChange(event.target.checked ? 'auto' : 'manual')
+                        }
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={handleManualTrelloSync}
+                      disabled={boardBusy}
+                    >
+                      Sync now
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary destructive"
+                      onClick={handleUnlinkBoard}
+                      disabled={boardBusy}
+                    >
+                      Unlink Trello
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={openTrelloLinkWizard}
+                    disabled={boardBusy}
+                  >
+                    Link to Trello
+                  </button>
+                )
+              ) : null}
             </div>
           ) : null}
         </header>
+
+        {token && board && unmappedColumns.length > 0 ? (
+          <div className="card trello-banner">
+            <p>
+              {unmappedColumns.length} column(s) are not mapped to Trello lists and will not sync.
+            </p>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                const column = unmappedColumns[0]
+                setMappingColumnId(column.id)
+                setMappingListId('')
+                setMappingCreateName('')
+                if (boardTrelloLink?.trello_board_id) {
+                  void loadTrelloListsForBoard(boardTrelloLink.trello_board_id)
+                }
+              }}
+            >
+              Map column: {unmappedColumns[0].name}
+            </button>
+          </div>
+        ) : null}
 
         {token && board ? (
           <div className="columns">
@@ -1176,6 +1590,148 @@ function App() {
           </form>
         </div>
       ) : null}
+
+      {showTrelloLinkModal && board ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setShowTrelloLinkModal(false)}>
+          <form
+            className="modal card form-card"
+            onSubmit={handleLinkBoardSubmit}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">Link board</p>
+                <strong>Connect to Trello</strong>
+              </div>
+              <button type="button" className="secondary" onClick={() => setShowTrelloLinkModal(false)}>
+                Close
+              </button>
+            </div>
+            <div className="modal-body">
+              <label>
+                Trello board
+                <select
+                  value={selectedTrelloBoardId}
+                  onChange={(event) => setSelectedTrelloBoardId(event.target.value)}
+                >
+                  {trelloBoardOptions.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {(board.columns ?? []).map((column) => (
+                <div key={column.id} className="mapping-row">
+                  <strong>{column.name}</strong>
+                  <select
+                    value={columnMappings[column.id]?.trello_list_id ?? ''}
+                    onChange={(event) =>
+                      setColumnMappings((current) => ({
+                        ...current,
+                        [column.id]: {
+                          ...current[column.id],
+                          trello_list_id: event.target.value,
+                          create_name: '',
+                        },
+                      }))
+                    }
+                  >
+                    <option value="">Create new list...</option>
+                    {trelloListOptions.map((list) => (
+                      <option key={list.id} value={list.id}>
+                        {list.name}
+                      </option>
+                    ))}
+                  </select>
+                  {!columnMappings[column.id]?.trello_list_id ? (
+                    <input
+                      placeholder={`New list name for ${column.name}`}
+                      value={columnMappings[column.id]?.create_name ?? ''}
+                      onChange={(event) =>
+                        setColumnMappings((current) => ({
+                          ...current,
+                          [column.id]: {
+                            ...current[column.id],
+                            create_name: event.target.value,
+                          },
+                        }))
+                      }
+                    />
+                  ) : null}
+                </div>
+              ))}
+            </div>
+            <div className="modal-actions form-actions">
+              <button type="button" className="secondary" onClick={() => setShowTrelloLinkModal(false)}>
+                Cancel
+              </button>
+              <button className="primary" type="submit" disabled={boardBusy}>
+                Link board
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {mappingColumnId ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setMappingColumnId(null)}>
+          <form
+            className="modal card form-card"
+            onSubmit={handleMapColumnSubmit}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">Map column</p>
+                <strong>Link column to Trello list</strong>
+              </div>
+              <button type="button" className="secondary" onClick={() => setMappingColumnId(null)}>
+                Close
+              </button>
+            </div>
+            <div className="modal-body">
+              <label>
+                Trello list
+                <select value={mappingListId} onChange={(event) => setMappingListId(event.target.value)}>
+                  <option value="">Create new list...</option>
+                  {trelloListOptions.map((list) => (
+                    <option key={list.id} value={list.id}>
+                      {list.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {!mappingListId ? (
+                <label>
+                  New list name
+                  <input
+                    value={mappingCreateName}
+                    onChange={(event) => setMappingCreateName(event.target.value)}
+                    placeholder="List name on Trello"
+                  />
+                </label>
+              ) : null}
+            </div>
+            <div className="modal-actions form-actions">
+              <button type="button" className="secondary" onClick={() => setMappingColumnId(null)}>
+                Cancel
+              </button>
+              <button className="primary" type="submit" disabled={boardBusy}>
+                Save mapping
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      <div className="toast-stack">
+        {toasts.map((toast) => (
+          <div key={toast.id} className="toast">
+            {toast.message}
+          </div>
+        ))}
+      </div>
     </main>
   )
 }

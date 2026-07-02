@@ -524,3 +524,48 @@ button:focus-visible {
     padding: 12px;
   }
 }
+
+.trello-card {
+  margin-top: 0;
+}
+
+.trello-banner {
+  padding: 16px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sync-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #d8d9df;
+}
+
+.mapping-row {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.toast-stack {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 60;
+  display: grid;
+  gap: 10px;
+}
+
+.toast {
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: rgba(15, 18, 25, 0.95);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #f5f7fb;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
