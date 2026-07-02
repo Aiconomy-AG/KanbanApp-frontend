@@ -7,6 +7,8 @@ import {
   setStoredToken,
 } from './lib/api'
 
+const ACTIVE_BOARD_KEY = 'kanban_active_board_id'
+
 const createEmptyTicketDraft = () => ({
   title: '',
   description: '',
@@ -16,7 +18,11 @@ const createEmptyTicketDraft = () => ({
 function App() {
   const [token, setToken] = useState(getStoredToken())
   const [user, setUser] = useState(null)
-  const [board, setBoard] = useState(null)
+  const [boards, setBoards] = useState([])
+  const [activeBoardId, setActiveBoardId] = useState(() => {
+    const stored = localStorage.getItem(ACTIVE_BOARD_KEY)
+    return stored ? Number(stored) : null
+  })
   const [loading, setLoading] = useState(Boolean(token))
   const [mutating, setMutating] = useState(false)
   const [error, setError] = useState('')
@@ -31,11 +37,40 @@ function App() {
   const [editingTicketId, setEditingTicketId] = useState(null)
   const [editingTicketForm, setEditingTicketForm] = useState(createEmptyTicketDraft())
   const [draggingTicketId, setDraggingTicketId] = useState(null)
+  const [draggingColumnId, setDraggingColumnId] = useState(null)
   const [dragOverColumnId, setDragOverColumnId] = useState(null)
+  const [editingColumnId, setEditingColumnId] = useState(null)
+  const [editingColumnName, setEditingColumnName] = useState('')
+  const [showNewColumnForm, setShowNewColumnForm] = useState(false)
+  const [newColumnName, setNewColumnName] = useState('')
+  const [showCreateBoardForm, setShowCreateBoardForm] = useState(false)
+  const [newBoardName, setNewBoardName] = useState('')
 
-  async function loadBoard(nextToken = token) {
+  const board = useMemo(
+    () => boards.find((item) => item.id === activeBoardId) ?? null,
+    [boards, activeBoardId],
+  )
+
+  function selectBoard(boardId) {
+    setActiveBoardId(boardId)
+    localStorage.setItem(ACTIVE_BOARD_KEY, String(boardId))
+  }
+
+  function upsertBoard(updatedBoard) {
+    setBoards((current) => {
+      const exists = current.some((item) => item.id === updatedBoard.id)
+
+      if (!exists) {
+        return [...current, updatedBoard]
+      }
+
+      return current.map((item) => (item.id === updatedBoard.id ? updatedBoard : item))
+    })
+  }
+
+  async function loadBoards(nextToken = token, preferredBoardId = activeBoardId) {
     if (!nextToken) {
-      return null
+      return []
     }
 
     const [me, boardsResponse] = await Promise.all([
@@ -43,20 +78,32 @@ function App() {
       apiRequest('/api/boards', { token: nextToken }),
     ])
 
-    const nextBoard = boardsResponse.boards?.[0] ?? null
+    const nextBoards = boardsResponse.boards ?? []
+    const nextActiveId = nextBoards.some((item) => item.id === preferredBoardId)
+      ? preferredBoardId
+      : nextBoards[0]?.id ?? null
 
     setUser(me.user)
-    setBoard(nextBoard)
+    setBoards(nextBoards)
 
-    if (nextBoard?.columns?.length) {
+    if (nextActiveId) {
+      selectBoard(nextActiveId)
+    } else {
+      setActiveBoardId(null)
+      localStorage.removeItem(ACTIVE_BOARD_KEY)
+    }
+
+    const activeBoard = nextBoards.find((item) => item.id === nextActiveId) ?? null
+
+    if (activeBoard?.columns?.length) {
       setTicketColumnId((current) => {
-        const hasCurrent = nextBoard.columns.some((column) => String(column.id) === current)
+        const hasCurrent = activeBoard.columns.some((column) => String(column.id) === current)
 
-        return hasCurrent ? current : String(nextBoard.columns[0].id)
+        return hasCurrent ? current : String(activeBoard.columns[0].id)
       })
     }
 
-    return nextBoard
+    return nextBoards
   }
 
   useEffect(() => {
@@ -75,12 +122,14 @@ function App() {
           return
         }
 
-        await loadBoard(token)
+        await loadBoards(token)
       } catch (exception) {
         clearStoredToken()
         setToken(null)
         setUser(null)
-        setBoard(null)
+        setBoards([])
+        setActiveBoardId(null)
+        localStorage.removeItem(ACTIVE_BOARD_KEY)
         setTicketForm(createEmptyTicketDraft())
         setTicketColumnId('')
         setError(exception.message)
@@ -131,6 +180,19 @@ function App() {
     })
   }, [editingTicket])
 
+  function applyAuthBoard(response) {
+    if (!response.board) {
+      return
+    }
+
+    setBoards([response.board])
+    selectBoard(response.board.id)
+
+    if (response.board.columns?.length) {
+      setTicketColumnId(String(response.board.columns[0].id))
+    }
+  }
+
   async function handleLoginSubmit(event) {
     event.preventDefault()
     setError('')
@@ -144,7 +206,7 @@ function App() {
       setStoredToken(response.token)
       setToken(response.token)
       setUser(response.user)
-      setBoard(response.board ?? null)
+      applyAuthBoard(response)
     } catch (exception) {
       setError(exception.message)
     }
@@ -163,7 +225,7 @@ function App() {
       setStoredToken(response.token)
       setToken(response.token)
       setUser(response.user)
-      setBoard(response.board ?? null)
+      applyAuthBoard(response)
     } catch (exception) {
       setError(exception.message)
     }
@@ -180,17 +242,23 @@ function App() {
       clearStoredToken()
       setToken(null)
       setUser(null)
-      setBoard(null)
+      setBoards([])
+      setActiveBoardId(null)
+      localStorage.removeItem(ACTIVE_BOARD_KEY)
       setTicketForm(createEmptyTicketDraft())
       setTicketColumnId('')
       setEditingTicketId(null)
       setDraggingTicketId(null)
+      setDraggingColumnId(null)
       setDragOverColumnId(null)
+      setEditingColumnId(null)
+      setShowNewColumnForm(false)
+      setShowCreateBoardForm(false)
       setError('')
     }
   }
 
-  async function reloadBoard() {
+  async function reloadBoards() {
     if (!token) {
       return
     }
@@ -198,7 +266,73 @@ function App() {
     setMutating(true)
 
     try {
-      await loadBoard(token)
+      await loadBoards(token, activeBoardId)
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  async function handleCreateBoardSubmit(event) {
+    event.preventDefault()
+
+    if (!token || !newBoardName.trim()) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      const response = await apiRequest('/api/boards', {
+        method: 'POST',
+        token,
+        body: { name: newBoardName.trim() },
+      })
+
+      upsertBoard(response.board)
+      selectBoard(response.board.id)
+      setNewBoardName('')
+      setShowCreateBoardForm(false)
+
+      if (response.board.columns?.length) {
+        setTicketColumnId(String(response.board.columns[0].id))
+      }
+    } catch (exception) {
+      setError(exception.message)
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  async function handleDeleteBoard() {
+    if (!token || !board || boards.length <= 1) {
+      return
+    }
+
+    if (!window.confirm(`Delete board "${board.name}"? All columns and tickets will be removed.`)) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      await apiRequest(`/api/boards/${board.id}`, {
+        method: 'DELETE',
+        token,
+      })
+
+      const remainingBoards = boards.filter((item) => item.id !== board.id)
+      setBoards(remainingBoards)
+
+      if (remainingBoards.length) {
+        selectBoard(remainingBoards[0].id)
+      } else {
+        setActiveBoardId(null)
+        localStorage.removeItem(ACTIVE_BOARD_KEY)
+      }
+    } catch (exception) {
+      setError(exception.message)
     } finally {
       setMutating(false)
     }
@@ -233,7 +367,7 @@ function App() {
       })
 
       setTicketForm(createEmptyTicketDraft())
-      await reloadBoard()
+      await reloadBoards()
     } catch (exception) {
       setError(exception.message)
     } finally {
@@ -260,7 +394,7 @@ function App() {
 
       setEditingTicketId(null)
       setEditingTicketForm(createEmptyTicketDraft())
-      await reloadBoard()
+      await reloadBoards()
     } catch (exception) {
       setError(exception.message)
     } finally {
@@ -287,7 +421,7 @@ function App() {
         setEditingTicketForm(createEmptyTicketDraft())
       }
 
-      await reloadBoard()
+      await reloadBoards()
     } catch (exception) {
       setError(exception.message)
     } finally {
@@ -310,41 +444,37 @@ function App() {
 
     const previousBoard = board
 
-    setBoard((current) => {
-      if (!current) {
-        return current
-      }
+    upsertBoard({
+      ...board,
+      columns: (() => {
+        let movedTicket = null
 
-      let movedTicket = null
+        const nextColumns = board.columns.map((column) => {
+          const tickets = column.tickets ?? []
+          const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId)
 
-      const nextColumns = current.columns.map((column) => {
-        const tickets = column.tickets ?? []
-        const ticketIndex = tickets.findIndex((ticket) => ticket.id === ticketId)
+          if (ticketIndex === -1) {
+            return column
+          }
 
-        if (ticketIndex === -1) {
-          return column
+          movedTicket = tickets[ticketIndex]
+
+          return {
+            ...column,
+            tickets: tickets.filter((ticket) => ticket.id !== ticketId),
+          }
+        })
+
+        if (!movedTicket) {
+          return board.columns
         }
 
-        movedTicket = tickets[ticketIndex]
-
-        return {
-          ...column,
-          tickets: tickets.filter((ticket) => ticket.id !== ticketId),
-        }
-      })
-
-      if (!movedTicket) {
-        return current
-      }
-
-      return {
-        ...current,
-        columns: nextColumns.map((column) =>
+        return nextColumns.map((column) =>
           column.id === columnId
             ? { ...column, tickets: [...(column.tickets ?? []), movedTicket] }
             : column,
-        ),
-      }
+        )
+      })(),
     })
 
     setError('')
@@ -356,30 +486,205 @@ function App() {
         body: { column_id: columnId },
       })
     } catch (exception) {
-      setBoard(previousBoard)
+      upsertBoard(previousBoard)
       setError(exception.message)
     }
   }
 
-  function handleDragStart(ticketId) {
-    setDraggingTicketId(ticketId)
-  }
-
-  function handleDragEnd() {
-    setDraggingTicketId(null)
-    setDragOverColumnId(null)
-  }
-
-  function handleDrop(event, columnId) {
-    event.preventDefault()
-
-    if (!draggingTicketId) {
+  async function reorderColumns(sourceColumnId, targetColumnId) {
+    if (!token || !board || sourceColumnId === targetColumnId) {
       return
     }
 
-    void moveTicket(draggingTicketId, columnId)
+    const columnIds = board.columns.map((column) => column.id)
+    const sourceIndex = columnIds.indexOf(sourceColumnId)
+    const targetIndex = columnIds.indexOf(targetColumnId)
+
+    if (sourceIndex === -1 || targetIndex === -1) {
+      return
+    }
+
+    const nextColumnIds = [...columnIds]
+    nextColumnIds.splice(sourceIndex, 1)
+    nextColumnIds.splice(targetIndex, 0, sourceColumnId)
+
+    const columnMap = Object.fromEntries(board.columns.map((column) => [column.id, column]))
+    const previousBoard = board
+
+    upsertBoard({
+      ...board,
+      columns: nextColumnIds.map((id) => columnMap[id]),
+    })
+
+    setError('')
+
+    try {
+      const response = await apiRequest(`/api/boards/${board.id}/columns/reorder`, {
+        method: 'PATCH',
+        token,
+        body: { column_ids: nextColumnIds },
+      })
+
+      upsertBoard(response.board)
+    } catch (exception) {
+      upsertBoard(previousBoard)
+      setError(exception.message)
+    }
+  }
+
+  function startEditingColumn(column) {
+    setEditingColumnId(column.id)
+    setEditingColumnName(column.name)
+  }
+
+  async function saveColumnName(columnId) {
+    if (!token || !board) {
+      return
+    }
+
+    const name = editingColumnName.trim()
+
+    if (!name) {
+      setEditingColumnId(null)
+      return
+    }
+
+    const currentColumn = board.columns.find((column) => column.id === columnId)
+
+    if (!currentColumn || currentColumn.name === name) {
+      setEditingColumnId(null)
+      return
+    }
+
+    setError('')
+
+    try {
+      const response = await apiRequest(`/api/boards/${board.id}/columns/${columnId}`, {
+        method: 'PATCH',
+        token,
+        body: { name },
+      })
+
+      upsertBoard({
+        ...board,
+        columns: board.columns.map((column) =>
+          column.id === columnId ? { ...column, name: response.column.name } : column,
+        ),
+      })
+      setEditingColumnId(null)
+    } catch (exception) {
+      setError(exception.message)
+    }
+  }
+
+  async function handleAddColumnSubmit(event) {
+    event.preventDefault()
+
+    if (!token || !board || !newColumnName.trim()) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      const response = await apiRequest(`/api/boards/${board.id}/columns`, {
+        method: 'POST',
+        token,
+        body: { name: newColumnName.trim() },
+      })
+
+      upsertBoard({
+        ...board,
+        columns: [...board.columns, { ...response.column, tickets: [] }],
+      })
+      setNewColumnName('')
+      setShowNewColumnForm(false)
+    } catch (exception) {
+      setError(exception.message)
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  async function handleDeleteColumn(column) {
+    if (!token || !board || board.columns.length <= 1) {
+      return
+    }
+
+    const otherColumns = board.columns.filter((item) => item.id !== column.id)
+    const ticketCount = column.tickets?.length ?? 0
+    let targetColumnId = null
+
+    if (ticketCount > 0) {
+      targetColumnId = otherColumns[0]?.id ?? null
+
+      if (!targetColumnId) {
+        return
+      }
+
+      const confirmed = window.confirm(
+        `Delete column "${column.name}"? Its ${ticketCount} ticket(s) will move to "${otherColumns[0].name}".`,
+      )
+
+      if (!confirmed) {
+        return
+      }
+    } else if (!window.confirm(`Delete column "${column.name}"?`)) {
+      return
+    }
+
+    setMutating(true)
+    setError('')
+
+    try {
+      await apiRequest(`/api/boards/${board.id}/columns/${column.id}`, {
+        method: 'DELETE',
+        token,
+        body: ticketCount > 0 ? { target_column_id: targetColumnId } : undefined,
+      })
+
+      await reloadBoards()
+    } catch (exception) {
+      setError(exception.message)
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  function handleTicketDragStart(ticketId) {
+    setDraggingTicketId(ticketId)
+  }
+
+  function handleTicketDragEnd() {
     setDraggingTicketId(null)
     setDragOverColumnId(null)
+  }
+
+  function handleColumnDragStart(columnId) {
+    setDraggingColumnId(columnId)
+  }
+
+  function handleColumnDragEnd() {
+    setDraggingColumnId(null)
+    setDragOverColumnId(null)
+  }
+
+  function handleColumnAreaDrop(event, columnId) {
+    event.preventDefault()
+
+    if (draggingColumnId) {
+      void reorderColumns(draggingColumnId, columnId)
+      setDraggingColumnId(null)
+      setDragOverColumnId(null)
+      return
+    }
+
+    if (draggingTicketId) {
+      void moveTicket(draggingTicketId, columnId)
+      setDraggingTicketId(null)
+      setDragOverColumnId(null)
+    }
   }
 
   const boardBusy = loading || mutating
@@ -504,6 +809,7 @@ function App() {
                 <select
                   value={ticketColumnId}
                   onChange={(event) => setTicketColumnId(event.target.value)}
+                  disabled={!columns.length}
                 >
                   {columns.map((column) => (
                     <option key={column.id} value={String(column.id)}>
@@ -560,7 +866,7 @@ function App() {
                 </select>
               </label>
 
-              <button className="primary" type="submit" disabled={boardBusy}>
+              <button className="primary" type="submit" disabled={boardBusy || !columns.length}>
                 Add ticket
               </button>
             </form>
@@ -572,28 +878,144 @@ function App() {
 
       <section className="board-area">
         <header className="board-header card">
-          <div>
-            <p className="eyebrow">Board</p>
-            <h2>{board?.name ?? 'No board loaded yet'}</h2>
+          <div className="board-header-main">
+            <div>
+              <p className="eyebrow">Board</p>
+              <h2>{board?.name ?? 'No board loaded yet'}</h2>
+            </div>
+
+            {token && boards.length > 1 ? (
+              <div className="board-selector">
+                {boards.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={item.id === activeBoardId ? 'active' : ''}
+                    onClick={() => selectBoard(item.id)}
+                  >
+                    {item.name}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
+
+          {token ? (
+            <div className="board-header-actions">
+              {showCreateBoardForm ? (
+                <form className="inline-form" onSubmit={handleCreateBoardSubmit}>
+                  <input
+                    value={newBoardName}
+                    onChange={(event) => setNewBoardName(event.target.value)}
+                    placeholder="Board name"
+                    autoFocus
+                  />
+                  <button className="primary" type="submit" disabled={boardBusy}>
+                    Create
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => {
+                      setShowCreateBoardForm(false)
+                      setNewBoardName('')
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setShowCreateBoardForm(true)}
+                >
+                  New board
+                </button>
+              )}
+
+              {board && boards.length > 1 ? (
+                <button
+                  type="button"
+                  className="secondary destructive"
+                  onClick={handleDeleteBoard}
+                  disabled={boardBusy}
+                >
+                  Delete board
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </header>
 
         {token && board ? (
-          <div className="columns">
+          <div
+            className="columns"
+            style={{
+              gridTemplateColumns: `repeat(${columns.length + 1}, minmax(240px, 1fr))`,
+            }}
+          >
             {columns.map((column) => (
               <article
-                className={`column card ${dragOverColumnId === column.id ? 'drag-over' : ''}`}
+                className={`column card ${
+                  dragOverColumnId === column.id ? 'drag-over' : ''
+                } ${draggingColumnId === column.id ? 'is-dragging-column' : ''}`}
                 key={column.id}
                 onDragOver={(event) => {
                   event.preventDefault()
                   setDragOverColumnId(column.id)
                 }}
                 onDragLeave={() => setDragOverColumnId(null)}
-                onDrop={(event) => handleDrop(event, column.id)}
+                onDrop={(event) => handleColumnAreaDrop(event, column.id)}
               >
-                <div className="column-head">
-                  <h3>{column.name}</h3>
-                  <span>{column.tickets?.length ?? 0}</span>
+                <div
+                  className="column-head"
+                  draggable
+                  onDragStart={() => handleColumnDragStart(column.id)}
+                  onDragEnd={handleColumnDragEnd}
+                >
+                  {editingColumnId === column.id ? (
+                    <input
+                      className="column-name-input"
+                      value={editingColumnName}
+                      onChange={(event) => setEditingColumnName(event.target.value)}
+                      onBlur={() => saveColumnName(column.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault()
+                          void saveColumnName(column.id)
+                        }
+
+                        if (event.key === 'Escape') {
+                          setEditingColumnId(null)
+                        }
+                      }}
+                      autoFocus
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="column-name-button"
+                      onClick={() => startEditingColumn(column)}
+                    >
+                      {column.name}
+                    </button>
+                  )}
+
+                  <div className="column-head-actions">
+                    <span>{column.tickets?.length ?? 0}</span>
+                    {columns.length > 1 ? (
+                      <button
+                        type="button"
+                        className="secondary destructive column-delete"
+                        onClick={() => handleDeleteColumn(column)}
+                        disabled={boardBusy}
+                        aria-label={`Delete column ${column.name}`}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
 
                 <div className="ticket-list">
@@ -602,8 +1024,8 @@ function App() {
                       className={`ticket ${draggingTicketId === ticket.id ? 'is-dragging' : ''}`}
                       key={ticket.id}
                       draggable
-                      onDragStart={() => handleDragStart(ticket.id)}
-                      onDragEnd={handleDragEnd}
+                      onDragStart={() => handleTicketDragStart(ticket.id)}
+                      onDragEnd={handleTicketDragEnd}
                     >
                       <div className="ticket-top">
                         <strong>{ticket.title}</strong>
@@ -632,12 +1054,51 @@ function App() {
                 </div>
               </article>
             ))}
+
+            <article className="column card column-add">
+              {showNewColumnForm ? (
+                <form className="column-add-form" onSubmit={handleAddColumnSubmit}>
+                  <label>
+                    Column name
+                    <input
+                      value={newColumnName}
+                      onChange={(event) => setNewColumnName(event.target.value)}
+                      placeholder="New column"
+                      autoFocus
+                    />
+                  </label>
+                  <div className="form-actions">
+                    <button className="primary" type="submit" disabled={boardBusy}>
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => {
+                        setShowNewColumnForm(false)
+                        setNewColumnName('')
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  className="secondary column-add-button"
+                  onClick={() => setShowNewColumnForm(true)}
+                >
+                  + Add column
+                </button>
+              )}
+            </article>
           </div>
         ) : (
           <div className="card empty-state">
             <p>Sign in or create an account to load the board from the Laravel API.</p>
             <p className="muted">
-              Tickets can be created, edited, deleted, and moved between the five saved columns.
+              Create boards, customize columns, and move tickets between them.
             </p>
           </div>
         )}
