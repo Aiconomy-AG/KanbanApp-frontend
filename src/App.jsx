@@ -91,8 +91,10 @@ function App() {
     ])
 
     const nextBoards = boardsResponse.boards ?? []
-    const nextActiveId = nextBoards.some((item) => item.id === preferredBoardId)
-      ? preferredBoardId
+    const storedBoardId = localStorage.getItem(ACTIVE_BOARD_KEY)
+    const resolvedPreferredId = preferredBoardId ?? (storedBoardId ? Number(storedBoardId) : null)
+    const nextActiveId = nextBoards.some((item) => item.id === resolvedPreferredId)
+      ? resolvedPreferredId
       : nextBoards[0]?.id ?? null
 
     setUser(me.user)
@@ -113,6 +115,32 @@ function App() {
 
         return hasCurrent ? current : String(activeBoard.columns[0].id)
       })
+    }
+
+    return nextBoards
+  }
+
+  async function refreshBoards(nextToken = token) {
+    if (!nextToken) {
+      return []
+    }
+
+    const boardsResponse = await apiRequest('/api/boards', { token: nextToken })
+    const nextBoards = boardsResponse.boards ?? []
+    const storedBoardId = localStorage.getItem(ACTIVE_BOARD_KEY)
+    const preferredBoardId = storedBoardId ? Number(storedBoardId) : activeBoardId
+    const preferredStillExists = preferredBoardId
+      && nextBoards.some((item) => item.id === preferredBoardId)
+
+    setBoards(nextBoards)
+
+    if (preferredStillExists) {
+      setActiveBoardId(preferredBoardId)
+    } else if (nextBoards.length > 0) {
+      selectBoard(nextBoards[0].id)
+    } else {
+      setActiveBoardId(null)
+      localStorage.removeItem(ACTIVE_BOARD_KEY)
     }
 
     return nextBoards
@@ -403,7 +431,7 @@ function App() {
     setMutating(true)
 
     try {
-      await loadBoards(token, activeBoardId)
+      await refreshBoards(token)
     } finally {
       setMutating(false)
     }
