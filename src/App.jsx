@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   apiRequest,
@@ -49,6 +49,7 @@ function App() {
   const [trelloApiKey, setTrelloApiKey] = useState('')
   const [trelloSyncing, setTrelloSyncing] = useState(false)
   const [toasts, setToasts] = useState([])
+  const lastSyncRevisionRef = useRef(null)
 
   const board = useMemo(
     () => boards.find((item) => item.id === activeBoardId) ?? null,
@@ -309,6 +310,58 @@ function App() {
 
     return () => window.clearInterval(interval)
   }, [token, trelloStatus.connected, trelloSyncing])
+
+  useEffect(() => {
+    if (!token) {
+      lastSyncRevisionRef.current = null
+      return
+    }
+
+    let alive = true
+
+    async function pollSyncState() {
+      if (!alive || document.visibilityState !== 'visible') {
+        return
+      }
+
+      try {
+        const state = await apiRequest('/api/sync/state', { token })
+        const revision = state.revision ?? null
+
+        if (revision && revision !== lastSyncRevisionRef.current) {
+          if (lastSyncRevisionRef.current !== null) {
+            await refreshBoards(token)
+          }
+
+          lastSyncRevisionRef.current = revision
+        } else if (revision && lastSyncRevisionRef.current === null) {
+          lastSyncRevisionRef.current = revision
+        }
+      } catch {
+        // Ignore background sync errors.
+      }
+    }
+
+    void pollSyncState()
+
+    const interval = window.setInterval(() => {
+      void pollSyncState()
+    }, 3000)
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'visible') {
+        void pollSyncState()
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      alive = false
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [token])
 
   const editingTicket = useMemo(() => {
     if (!board || !editingTicketId) {
